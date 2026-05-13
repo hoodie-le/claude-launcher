@@ -39,7 +39,7 @@ jobs:
             echo
             echo "**Homebrew install:**"
             echo '```'
-            echo "brew install hoodie-le/claude-launcher/claude-launcher"
+            echo "brew install hoodie-le/tap/claude-launcher"
             echo '```'
             echo EOF
           } >> "$GITHUB_OUTPUT"

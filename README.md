@@ -36,15 +36,17 @@ A tiny macOS CLI for developers who run **multiple Claude Code sessions in paral
 ### Homebrew (recommended)
 
 ```bash
-brew install hoodie-le/claude-launcher/claude-launcher
+brew install hoodie-le/tap/claude-launcher
 ```
 
 Or tap once and install short-form:
 
 ```bash
-brew tap hoodie-le/claude-launcher
+brew tap hoodie-le/tap
 brew install claude-launcher
 ```
+
+> The formula lives at [hoodie-le/homebrew-tap](https://github.com/hoodie-le/homebrew-tap).
 
 ### Manual
 
