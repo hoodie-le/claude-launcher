@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify script version matches tag
+        run: |
+          script_version=$(awk -F'"' '/^VERSION=/ {print $2; exit}' bin/claude-launcher)
+          if [[ "$script_version" != "${{ steps.ver.outputs.VERSION }}" ]]; then
+            echo "::error::Tag ${{ github.ref_name }} does not match script VERSION=$script_version"
+            exit 1
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          {
+            echo 'BODY<<EOF'
+            awk '
+              /^## \['"${{ steps.ver.outputs.VERSION }}"'\]/ { flag=1; next }
+              /^## \[/ && flag { exit }
+              flag
+            ' CHANGELOG.md
+            echo
+            echo "**Homebrew install:**"
+            echo '```'
+            echo "brew install hoodie-le/claude-launcher/claude-launcher"
+            echo '```'
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.ver.outputs.VERSION }}
+          body: ${{ steps.notes.outputs.BODY }}
+          draft: false
+          prerelease: false
+
+      - name: Compute tarball SHA256 for Homebrew formula
+        run: |
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+          curl -fsSL "$TARBALL_URL" -o release.tar.gz
+          SHA=$(shasum -a 256 release.tar.gz | awk '{print $1}')
+          echo "::notice title=Homebrew SHA256::Update Formula/claude-launcher.rb → sha256 \"$SHA\""
+          echo "Tarball: $TARBALL_URL"
+          echo "sha256:  $SHA"

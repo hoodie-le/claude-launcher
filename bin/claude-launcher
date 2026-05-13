@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# claude-launcher — Open Ghostty with N equal split panes, each cd'd into a
+# selected repo and running a command (default: `claude --dangerously-skip-permissions`).
+#
+# Homepage: https://github.com/hoodie-le/claude-launcher
+# License:  MIT
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Defaults
+# ────────────────────────────────────────────────────────────────────────────
+DEFAULT_WORKSPACES_DIR="$HOME/Workspaces"
+DEFAULT_SPLITS=5
+DEFAULT_DIRECTION="v"       # v=vertical (side-by-side), h=horizontal (stacked)
+DEFAULT_WINDOW="n"          # n=new Ghostty window, c=current window
+DEFAULT_COMMAND="claude --dangerously-skip-permissions"
+DEFAULT_MAX_DEPTH=2
+DEFAULT_EQUALIZE=1
+DEFAULT_EXCLUDES='node_modules,.git,.next,.nuxt,dist,build,.venv,__pycache__,target,.idea,.vscode'
+
+# ────────────────────────────────────────────────────────────────────────────
+# Load config file (KEY=VALUE shell-sourceable)
+# ────────────────────────────────────────────────────────────────────────────
+CONFIG_FILE="${CLAUDE_LAUNCHER_CONFIG:-$HOME/.config/claude-launcher/config}"
+if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
+# Resolve settings: defaults < config file < env vars < CLI flags
+# ────────────────────────────────────────────────────────────────────────────
+WORKSPACES_DIR="${CLAUDE_LAUNCHER_WORKSPACES:-${WORKSPACES_DIR:-$DEFAULT_WORKSPACES_DIR}}"
+SPLITS="${CLAUDE_LAUNCHER_SPLITS:-${SPLITS:-$DEFAULT_SPLITS}}"
+DIRECTION="${CLAUDE_LAUNCHER_DIRECTION:-${DIRECTION:-$DEFAULT_DIRECTION}}"
+WINDOW="${CLAUDE_LAUNCHER_WINDOW:-${WINDOW:-$DEFAULT_WINDOW}}"
+COMMAND="${CLAUDE_LAUNCHER_COMMAND:-${COMMAND:-$DEFAULT_COMMAND}}"
+MAX_DEPTH="${CLAUDE_LAUNCHER_MAX_DEPTH:-${MAX_DEPTH:-$DEFAULT_MAX_DEPTH}}"
+EQUALIZE="${CLAUDE_LAUNCHER_EQUALIZE:-${EQUALIZE:-$DEFAULT_EQUALIZE}}"
+EXCLUDES="${CLAUDE_LAUNCHER_EXCLUDES:-${EXCLUDES:-$DEFAULT_EXCLUDES}}"
+
+TARGET_DIR=""
+NON_INTERACTIVE=0
+
+# ────────────────────────────────────────────────────────────────────────────
+# UI helpers
+# ────────────────────────────────────────────────────────────────────────────
+if [[ -t 2 ]]; then
+    GREEN=$'\033[0;32m'; BLUE=$'\033[0;34m'; YELLOW=$'\033[1;33m'
+    RED=$'\033[0;31m'; DIM=$'\033[2m'; NC=$'\033[0m'
+else
+    GREEN=""; BLUE=""; YELLOW=""; RED=""; DIM=""; NC=""
+fi
+
+err()  { printf '%b\n' "${RED}✗ $*${NC}" >&2; }
+info() { printf '%b\n' "${BLUE}→ $*${NC}" >&2; }
+ok()   { printf '%b\n' "${GREEN}✓ $*${NC}" >&2; }
+warn() { printf '%b\n' "${YELLOW}! $*${NC}" >&2; }
+
+# ────────────────────────────────────────────────────────────────────────────
+# Usage
+# ────────────────────────────────────────────────────────────────────────────
+usage() {
+    cat <<EOF
+claude-launcher v$VERSION
+Open Ghostty with N equal split panes, each cd'd into a repo and running a command.
+
+USAGE:
+  claude-launcher [OPTIONS]
+
+OPTIONS:
+  -d, --dir DIR              Skip picker; use this directory directly
+  -n, --splits N             Number of split panes (default: $DEFAULT_SPLITS)
+  -D, --direction v|h        Split direction: v=side-by-side, h=stacked (default: $DEFAULT_DIRECTION)
+  -w, --window n|c           Open new (n) or current (c) Ghostty window (default: $DEFAULT_WINDOW)
+  -c, --command CMD          Command to run in each pane (default: claude --dangerously-skip-permissions)
+  -W, --workspaces DIR       Root workspaces directory (default: ~/Workspaces)
+      --depth N              Max search depth for repo picker (default: $DEFAULT_MAX_DEPTH)
+      --no-equalize          Skip equalizing split sizes
+  -y, --yes                  Skip all interactive prompts (requires --dir)
+  -h, --help                 Show this help
+  -V, --version              Show version
+
+CONFIG FILE (~/.config/claude-launcher/config):
+  Shell KEY=VALUE format. Example:
+      WORKSPACES_DIR="\$HOME/code"
+      SPLITS=3
+      DIRECTION=h
+      COMMAND="claude --dangerously-skip-permissions"
+
+ENVIRONMENT VARIABLES:
+  CLAUDE_LAUNCHER_WORKSPACES, _SPLITS, _DIRECTION, _WINDOW, _COMMAND,
+  _MAX_DEPTH, _EQUALIZE, _EXCLUDES, _CONFIG
+
+EXAMPLES:
+  claude-launcher                                    # fully interactive
+  claude-launcher -d ~/code/myapp -n 3 -y           # one-shot, no prompts
+  claude-launcher -c 'git pull && pnpm dev'         # run something else
+EOF
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# Parse CLI flags
+# ────────────────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--dir)         TARGET_DIR="$2"; shift 2 ;;
+        -n|--splits)      SPLITS="$2"; shift 2 ;;
+        -D|--direction)   DIRECTION="$2"; shift 2 ;;
+        -w|--window)      WINDOW="$2"; shift 2 ;;
+        -c|--command)     COMMAND="$2"; shift 2 ;;
+        -W|--workspaces)  WORKSPACES_DIR="$2"; shift 2 ;;
+        --depth)          MAX_DEPTH="$2"; shift 2 ;;
+        --no-equalize)    EQUALIZE=0; shift ;;
+        -y|--yes)         NON_INTERACTIVE=1; shift ;;
+        -h|--help)        usage; exit 0 ;;
+        -V|--version)     echo "claude-launcher v$VERSION"; exit 0 ;;
+        --)               shift; break ;;
+        -*)               err "Unknown option: $1"; usage >&2; exit 2 ;;
+        *)                err "Unexpected argument: $1"; usage >&2; exit 2 ;;
+    esac
+done
+
+# ────────────────────────────────────────────────────────────────────────────
+# Validate environment
+# ────────────────────────────────────────────────────────────────────────────
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    err "claude-launcher currently supports macOS only (Ghostty + AppleScript)."
+    exit 1
+fi
+if [[ ! -d "/Applications/Ghostty.app" ]] && ! command -v ghostty >/dev/null 2>&1; then
+    err "Ghostty is not installed. → https://ghostty.org"
+    exit 1
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
+# Pick directory (skip if --dir given)
+# ────────────────────────────────────────────────────────────────────────────
+collect_dirs() {
+    local find_args=(-mindepth 1 -maxdepth "$MAX_DEPTH" -type d)
+    local IFS=','
+    for pat in $EXCLUDES; do
+        find_args+=(! -path "*/${pat}*")
+    done
+    find "$WORKSPACES_DIR" "${find_args[@]}" 2>/dev/null | sort
+}
+
+if [[ -z "$TARGET_DIR" ]]; then
+    if (( NON_INTERACTIVE )); then
+        err "--yes requires --dir to be set."
+        exit 2
+    fi
+    if [[ ! -d "$WORKSPACES_DIR" ]]; then
+        err "Workspaces directory not found: $WORKSPACES_DIR"
+        exit 1
+    fi
+
+    DIR_LIST=$(collect_dirs)
+    if [[ -z "$DIR_LIST" ]]; then
+        err "No directories found under $WORKSPACES_DIR"
+        exit 1
+    fi
+
+    printf '%b\n' "${BLUE}🚀 Claude Launcher v$VERSION${NC}" >&2
+
+    if command -v fzf >/dev/null 2>&1; then
+        RELATIVE=$(printf '%s\n' "$DIR_LIST" \
+            | sed "s|^$WORKSPACES_DIR/||" \
+            | fzf --prompt='📁 Repo > ' --height=60% --reverse --border \
+                  --header="Type to filter, Enter to select, Esc to cancel" || true)
+    else
+        warn "Tip: install 'fzf' for fuzzy search → brew install fzf"
+        local_repos=()
+        while IFS= read -r line; do
+            local_repos+=("${line#$WORKSPACES_DIR/}")
+        done <<< "$DIR_LIST"
+        {
+            i=1
+            for r in "${local_repos[@]}"; do
+                printf '  %2d) %s\n' "$i" "$r"
+                i=$((i+1))
+            done
+        } >&2
+        while :; do
+            read -rp "Select number (1-${#local_repos[@]}): " choice </dev/tty
+            if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#local_repos[@]} )); then
+                RELATIVE="${local_repos[$((choice-1))]}"
+                break
+            fi
+            warn "Invalid choice."
+        done
+    fi
+
+    if [[ -z "${RELATIVE:-}" ]]; then
+        err "No directory selected."
+        exit 1
+    fi
+    TARGET_DIR="$WORKSPACES_DIR/$RELATIVE"
+fi
+
+# Expand ~ and resolve
+TARGET_DIR="${TARGET_DIR/#\~/$HOME}"
+if [[ ! -d "$TARGET_DIR" ]]; then
+    err "Directory does not exist: $TARGET_DIR"
+    exit 1
+fi
+ok "Directory: $TARGET_DIR"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Prompt for remaining settings (unless --yes)
+# ────────────────────────────────────────────────────────────────────────────
+if ! (( NON_INTERACTIVE )); then
+    read -rp "Number of splits [$SPLITS]: " _v </dev/tty
+    SPLITS="${_v:-$SPLITS}"
+
+    printf '%b\n' "${DIM}Split direction: (v)ertical = side-by-side, (h)orizontal = stacked${NC}" >&2
+    read -rp "Direction [$DIRECTION]: " _v </dev/tty
+    DIRECTION="${_v:-$DIRECTION}"
+
+    printf '%b\n' "${DIM}Window mode: (n)ew Ghostty window or (c)urrent window${NC}" >&2
+    read -rp "Mode [$WINDOW]: " _v </dev/tty
+    WINDOW="${_v:-$WINDOW}"
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
+# Validate resolved values
+# ────────────────────────────────────────────────────────────────────────────
+if ! [[ "$SPLITS" =~ ^[1-9][0-9]*$ ]]; then
+    err "Invalid number of splits: $SPLITS"
+    exit 2
+fi
+case "$DIRECTION" in
+    v|V) SPLIT_USE_SHIFT=0 ;;
+    h|H) SPLIT_USE_SHIFT=1 ;;
+    *)   err "Invalid direction: $DIRECTION (use v or h)"; exit 2 ;;
+esac
+case "$WINDOW" in
+    n|N|c|C) ;;
+    *) err "Invalid window mode: $WINDOW (use n or c)"; exit 2 ;;
+esac
+
+# ────────────────────────────────────────────────────────────────────────────
+# Drive Ghostty
+# ────────────────────────────────────────────────────────────────────────────
+FULL_CMD="cd \"$TARGET_DIR\" && $COMMAND"
+
+info "Launching Ghostty with $SPLITS split pane(s)..."
+
+# Use clipboard for safe pasting of complex commands. Save & restore prior clipboard.
+PREV_CLIPBOARD=$(pbpaste 2>/dev/null || true)
+trap 'printf %s "$PREV_CLIPBOARD" | pbcopy 2>/dev/null || true' EXIT
+printf '%s' "$FULL_CMD" | pbcopy
+
+osascript -e 'tell application "Ghostty" to activate' >/dev/null
+sleep 0.6
+
+case "$WINDOW" in
+    n|N)
+        osascript -e 'tell application "System Events" to keystroke "n" using command down' >/dev/null
+        sleep 0.7
+        ;;
+esac
+
+paste_and_run() {
+    osascript -e 'tell application "System Events" to keystroke "v" using command down' >/dev/null
+    sleep 0.25
+    osascript -e 'tell application "System Events" to key code 36' >/dev/null
+}
+
+new_split() {
+    if (( SPLIT_USE_SHIFT == 1 )); then
+        osascript -e 'tell application "System Events" to keystroke "d" using {command down, shift down}' >/dev/null
+    else
+        osascript -e 'tell application "System Events" to keystroke "d" using command down' >/dev/null
+    fi
+}
+
+paste_and_run
+for ((i=1; i<SPLITS; i++)); do
+    sleep 0.45
+    new_split
+    sleep 0.6
+    paste_and_run
+done
+
+# Equalize panes: Ghostty default keybind is Cmd+Ctrl+= (super+ctrl+equal).
+if (( EQUALIZE )) && (( SPLITS > 1 )); then
+    sleep 0.4
+    osascript -e 'tell application "System Events" to keystroke "=" using {command down, control down}' >/dev/null
+fi
+
+ok "Opened $SPLITS split pane(s) in Ghostty at: $TARGET_DIR"

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          scandir: ./bin
+          additional_files: install.sh
+
+  syntax:
+    name: Bash syntax
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n bin/claude-launcher
+      - run: bash -n install.sh
+      - run: ./bin/claude-launcher --version
+      - run: ./bin/claude-launcher --help
